@@ -1,0 +1,768 @@
+---
+title: "Personal Activity"
+author: "Leard Fernandes"
+date: "Sunday, August 10, 2014"
+
+output: html_document
+---
+
+**Repository:** (https://github.com/leard/PersonaActivity.git)
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(caret)
+#library(pROC)
+library(ggplot2)
+library(knitr)
+library(xtable)
+
+#library(doMC)
+#registerDoMC(cores = 4)
+```
+
+```{r reference, echo=FALSE}
+
+incCount <- function(inObj, useName) {
+    nObj <- length(inObj)
+    useNum <- max(inObj) + 1
+    inObj <- c(inObj, useNum)
+    names(inObj)[nObj + 1] <- useName
+    inObj
+}
+figCount <- c(`_` = 0)
+tableCount <- c(`_` = 0)
+
+tableCat <- function(inFrame) {
+    outText <- paste(names(inFrame), collapse = " | ")
+    outText <- c(outText, paste(rep("---", ncol(inFrame)), collapse = " | "))
+    invisible(apply(inFrame, 1, function(inRow) {
+        outText <<- c(outText, paste(inRow, collapse = " | "))
+    }))
+    return(outText)
+}
+
+pasteLabel <- function(preText, inObj, objName, insLink = TRUE) {
+    objNum <- inObj[objName]
+
+    useText <- paste(preText, objNum, sep = " ")
+    if (insLink) {
+        useText <- paste("[", useText, "](#", objName, ")", sep = "")
+    }
+    useText
+}
+
+#Table Atribute
+
+tableAttr<-sprintf("style='%s' cellpadding=\"4\"", 
+                   paste("border:0",
+                         "border-top: 1px solid grey", 
+                         "border-bottom: 1px solid grey",
+                         sep="; "
+                         )
+                   )
+
+
+```
+
+### Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior. People rarely quantify how well they do the exercise. In this data set, six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.
+
+
+### Data
+
+The training data for this project are available here: 
+
+(https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+
+The test data are available here: 
+
+(https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+The data for this project come from this source: (http://groupware.les.inf.puc-rio.br/har).  
+
+```{r loaddata, echo=FALSE, cache=TRUE}
+fileUrlTr<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+fileUrlTe<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if(!file.exists("data")){
+    dir.create("data")
+}
+if(!file.exists("data//pml-testing.csv")){
+    download.file(fileUrlTr, destfile="data/pml-training.csv")
+}
+if(!file.exists("data//pml-training.csv")){
+    download.file(fileUrlTe, destfile="data/pml-training.csv")
+}
+
+personalDS<-read.csv("data//pml-training.csv",  na.strings=c("NA", "", "#DIV/0!"))
+names(personalDS)<-make.names(names(personalDS), allow_ = F)
+
+validationDS<-read.csv("data//pml-testing.csv", na.strings=c("NA", "", "#DIV/0!"))
+names(validationDS)<-make.names(names(validationDS), allow_ = F)
+
+
+```
+
+The loaded data set has many variables that are not necessary and with NA's values. Removing the unecessary variables and showing:
+```{r removingVAr, echo=FALSE, cache=TRUE}
+#Selecting the variables:
+#indexVar<-grep("^user.|^cvtd|^new.|^num.|^roll.|^pitch.|^yaw.|^total.|^gyros.|^accel.|^magnet.",names(personalDS))
+indexVar<-grep("^roll.|^pitch.|^yaw.|^total.|^gyros.|^accel.|^magnet.",names(personalDS))
+personalDSS<-personalDS[,c(indexVar,160)]
+validationDSS<-validationDS[,c(indexVar,160)]
+str(personalDSS)
+
+#Splitting the data set
+inTraining <- createDataPartition(personalDSS$classe, p = 0.75, list = FALSE)
+training <- personalDSS[inTraining, ]
+testing <- personalDSS[-inTraining, ]
+
+```
+
+The training set contains 75% (`r nrow(training)` rows) of the data. 
+
+```{r pca1Plot, echo=FALSE, fig.align='center', fig.width=20, fig.height=6, eval=FALSE}
+
+#Checking the distribution of the training and test set. Using the two first componentes of PCA analysis it is possible to see that the sets are homogeneous
+preProc<-preProcess(training[,-53], method = c("pca"), pcaComp=2)
+trainPC<-predict(preProc, training[,-53])
+group1 <- rep(c("Training"), nrow(trainPC))
+
+preProc2<-preProcess(testing[,-53], method = c("pca"), pcaComp=2)
+testPC<-predict(preProc2, testing[,-53])
+group2 <- rep(c("Testing"), nrow(testPC))
+
+df<-data.frame(rbind(cbind(trainPC, type=group1), cbind(testPC, type=group2)))
+group<-df$type
+qplot(df$PC1, df$PC2, colour=group, xlab = "PC1", ylab="PC2", main = "Training and Testing data")
+rm(group, group1, group2, preProc, trainPC, preProc2, testPC)
+
+```
+
+
+
+### Analysis
+
+For the modeling was used the Stochastic Gradient Boosting, that improving the accuracy of a predictive function by applying the function repeatedly, where each function output is combined with weighting. Thus the total error of the prediction is minimized.  
+
+Before define the model, was created parameters for tunning the final model. For a gradient boosting machine (GBM) model, there are three main tuning parameters:  
+
+* number of iterations, i.e. trees, (called n.trees in the gbm function)  
+* complexity of the tree, called interaction.depth  
+* learning rate: how quickly the algorithm adapts, called shrinkage  
+
+Therefore, has been used two groups of learning rate, 0.1 and 0.5; for the complexity tree has been used three groups, 4, 6 and 12. And finally, for the number of iterations has been used ranges between 50-500 and 50-1000. 
+Thus, the first group has been configured:
+ 
+* n.trees: (`r I((1:10)*50)`)
+* interaction.depth: (`r c(4,6,12)`)
+* shrinkage: 0.1
+
+And, the second group has been configured
+
+* n.trees: (`r I((1:20)*50)`)
+* interaction.depth: (`r c(4,6,12)`)
+* shrinkage: 0.05
+
+**GBM**  
+```{r gmbAna, echo=FALSE, eval=FALSE}
+
+
+fitControl <- trainControl(method = "repeatedcv", 
+                           number = 10, 
+                           repeats = 5,                           
+                           allowParallel = TRUE)
+
+#GBM1.1
+gbmGrid1.1 <-  expand.grid(.interaction.depth = c(4),
+                        .n.trees = (1:10)*50,
+                        .shrinkage = 0.1)
+
+set.seed(21810)
+#GBM with tunegrid
+system.time(
+    gbmPFit1.1 <- train(training$classe ~ ., 
+                 data = training,
+                 method = "gbm",                 
+                 trControl = fitControl,
+                 tuneGrid = gbmGrid1.1,               
+                 verbose = FALSE
+                 )
+    )
+gbmPFit1.1
+saveRDS(gbmPFit1.1, "data//gbmPFit1.1.rds")
+ggplot(gbmPFit1.1)
+
+#GBM1.2
+gbmGrid1.2 <-  expand.grid(.interaction.depth = c(6),
+                        .n.trees = (1:10)*50,
+                        .shrinkage = 0.1)
+
+set.seed(21710)
+#GLM with tunegrid
+system.time(
+    gbmPFit1.2 <- train(training$classe ~ ., 
+                 data = training,
+                 method = "gbm",                 
+                 trControl = fitControl,
+                 tuneGrid = gbmGrid1.2,               
+                 verbose = FALSE
+                 )
+    )
+gbmPFit1.2
+saveRDS(gbmPFit1.2, "data//gbmPFit1.2.rds")
+ggplot(gbmPFit1.2)
+
+
+#GBM1.3
+gbmGrid1.3 <-  expand.grid(.interaction.depth = c(12),
+                        .n.trees = (1:10)*50,
+                        .shrinkage = 0.1)
+
+set.seed(21610)
+#GBM with tunegrid
+system.time(
+    gbmPFit1.3 <- train(training$classe ~ ., 
+                 data = training,
+                 method = "gbm",                 
+                 trControl = fitControl,
+                 tuneGrid = gbmGrid1.3,               
+                 verbose = FALSE
+                 )
+    )
+gbmPFit1.3
+saveRDS(gbmPFit1.3, "data//gbmPFit1.3.rds")
+ggplot(gbmPFit1.3)
+
+
+fitControl <- trainControl(method = "repeatedcv", 
+                           number = 10, 
+                           repeats = 5,                           
+                           allowParallel = FALSE)
+
+
+#GBM2.1
+gbmGrid2.1 <-  expand.grid(.interaction.depth = c(4),
+                        .n.trees = (1:20)*50,
+                        .shrinkage = 0.05)
+
+set.seed(21510)
+#GBM with tunegrid
+system.time(
+    gbmPFit2.1 <- train(training$classe ~ ., 
+                 data = training,
+                 method = "gbm",                 
+                 trControl = fitControl,
+                 tuneGrid = gbmGrid2.1,               
+                 verbose = FALSE
+                 )
+    )
+gbmPFit2.1
+saveRDS(gbmPFit2.1, "data//gbmPFit2.1.rds")
+ggplot(gbmPFit2.1)
+
+#GBM2.2
+gbmGrid2.2 <-  expand.grid(.interaction.depth = c(6),
+                        .n.trees = (1:20)*50,
+                        .shrinkage = 0.05)
+
+set.seed(21410)
+#GBM with tunegrid
+system.time(
+    gbmPFit2.2 <- train(training$classe ~ ., 
+                 data = training,
+                 method = "gbm",                 
+                 trControl = fitControl,
+                 tuneGrid = gbmGrid2.2,               
+                 verbose = FALSE
+                 )
+    )
+gbmPFit2.2
+saveRDS(gbmPFit2.2, "data//gbmPFit2.2.rds")
+ggplot(gbmPFit2.2)
+
+#GBM2.3
+gbmGrid2.3 <-  expand.grid(.interaction.depth = c(12),
+                        .n.trees = (1:20)*50,
+                        .shrinkage = 0.05)
+
+set.seed(21310)
+#GBM with tunegrid
+system.time(
+    gbmPFit2.3 <- train(training$classe ~ .,
+                 data = training,
+                 method = "gbm",
+                 trControl = fitControl,
+                 tuneGrid = gbmGrid2.3,
+                 verbose = FALSE
+                 )
+    )
+gbmPFit2.3
+saveRDS(gbmPFit2.3, "data//gbmPFit2.3.rds")
+ggplot(gbmPFit2.3)
+
+
+
+
+```
+
+
+The model were previously calculated and loaded, because of the memory leak. Two groups of model were tunning. Was not used multiple values in fitControl, once the total memory used is too large. Thus the models has been splitted in six models.
+
+```{r loadGBMPFit,cache=TRUE}
+gbmPFit1.1<-readRDS("data/gbmPFit1.1.rds")
+gbmPFit1.2<-readRDS("data/gbmPFit1.2.rds")
+gbmPFit1.3<-readRDS("data/gbmPFit1.3.rds")
+gbmPFit2.1<-readRDS("data/gbmPFit2.1.rds")
+gbmPFit2.2<-readRDS("data/gbmPFit2.2.rds")
+gbmPFit2.3<-readRDS("data/gbmPFit2.3.rds")
+```
+
+The two best models, using Kappa metric are:
+```{r, echo=FALSE, cache=TRUE}
+gbmPFit1.Results<-rbind(gbmPFit1.1$results, gbmPFit1.2$results, gbmPFit1.3$results)
+gbmPFit2.Results<-rbind(gbmPFit2.1$results, gbmPFit2.2$results, gbmPFit2.3$results)
+
+gbmPFit1.Results[best(gbmPFit1.Results, metric="Kappa", maximize = TRUE),]
+gbmPFit2.Results[best(gbmPFit2.Results, metric="Kappa", maximize = TRUE),]
+
+```
+
+Applying a tolerance of 1% and 2%, the new models for shrinkage 0.1 are, respectively:
+```{r, echo=FALSE, cache=TRUE}
+whichRes1.1pct<-tolerance(gbmPFit1.Results, metric="Kappa", tol = 1, maximize =TRUE)
+whichRes1.2pct<-tolerance(gbmPFit1.Results, metric="Kappa", tol = 2, maximize =TRUE)
+
+gbmPFit1.Results[whichRes1.1pct,]
+gbmPFit1.Results[whichRes1.2pct,]
+
+```
+
+Applying a tolerance of 1% and 2%, the new models for shrinkage 0.05 are:
+```{r, echo=FALSE}
+whichRes2.1pct<-tolerance(gbmPFit2.Results, metric="Kappa", tol = 1, maximize =TRUE)
+whichRes2.2pct<-tolerance(gbmPFit2.Results, metric="Kappa", tol = 2, maximize =TRUE)
+
+gbmPFit2.Results[whichRes2.1pct,]
+gbmPFit2.Results[whichRes2.2pct,]
+
+```
+
+Combining the two models, the results for a tolerance of 1% and 2%:
+```{r, echo=FALSE}
+
+gbmPFit.Results<-rbind(gbmPFit1.Results, gbmPFit2.Results)
+whichRes.1pct<-tolerance(gbmPFit.Results, metric="Kappa", tol = 1, maximize =TRUE)
+whichRes.2pct<-tolerance(gbmPFit.Results, metric="Kappa", tol = 2, maximize =TRUE)
+
+gbmPFit.Results[whichRes.1pct,]
+gbmPFit.Results[whichRes.2pct,]
+
+```
+
+
+
+
+```{r newgbmFitControl, echo=FALSE, eval=FALSE}
+
+fitControl <- trainControl(method = "repeatedcv", 
+                           number = 10, 
+                           repeats = 5,                           
+                           allowParallel = TRUE)
+
+## First Model
+#GBM1.4.1pct
+gbmGrid1.4.1pct <-  expand.grid(.interaction.depth = c(4),
+                             .n.trees = 300,
+                             .shrinkage = 0.1)
+
+set.seed(21810)
+
+system.time(
+    gbmPFit1.4.1pct <- train(classe ~ ., 
+                          data = training,
+                          method = "gbm",                 
+                          trControl = fitControl,
+                          tuneGrid = gbmGrid1.4.1pct,               
+                          verbose = FALSE
+                          )
+    )
+
+gbmPFit1.4.1pct 
+saveRDS(gbmPFit1.4.1pct, "data//gbmPFit1.4.1pct.rds")
+
+#GBM1.4.2pct
+gbmGrid1.4.2pct <- expand.grid(.interaction.depth = c(4),
+                             .n.trees = 200,
+                             .shrinkage = 0.1)
+
+set.seed(21810)
+
+system.time(
+    gbmPFit1.4.2pct <- train(classe ~ ., 
+                          data = training,
+                          method = "gbm",                 
+                          trControl = fitControl,
+                          tuneGrid = gbmGrid1.4.2pct,               
+                          verbose = FALSE
+                          )
+    )
+
+gbmPFit1.4.2pct 
+saveRDS(gbmPFit1.4.2pct, "data//gbmPFit4.2pct.rds")
+
+
+## Second Model
+#GBM2.4.1pct
+gbmGrid2.4.1pct <-  expand.grid(.interaction.depth = c(4),
+                             .n.trees = 600,
+                             .shrinkage = 0.05)
+
+set.seed(21510)
+#GLM with tunegrid
+system.time(
+    gbmPFit2.4.1pct <- train(classe ~ ., 
+                          data = training,
+                          method = "gbm",                 
+                          trControl = fitControl,
+                          tuneGrid = gbmGrid2.4.1pct,               
+                          verbose = FALSE
+                          )
+    )
+
+gbmPFit2.4.1pct 
+saveRDS(gbmPFit2.4.1pct, "data//gbmPFit2.4.1pct.rds")
+
+#GBM2.4.2pct
+gbmGrid2.4.2pct <-  expand.grid(.interaction.depth = c(4),
+                             .n.trees = 400,
+                             .shrinkage = 0.05)
+
+set.seed(21510)
+#GLM with tunegrid
+system.time(
+    gbmPFit2.4.2pct <- train(classe ~ ., 
+                          data = training,
+                          method = "gbm",                 
+                          trControl = fitControl,
+                          tuneGrid = gbmGrid2.4.2pct,               
+                          verbose = FALSE
+                          )
+    )
+
+gbmPFit2.4.2pct 
+saveRDS(gbmPFit2.4.2pct, "data//gbmPFit2.4.2pct.rds")
+
+
+```
+
+The models were recalculated with the chosen values. The model were previously calculated and loaded, because of the memory leak.
+
+```{r, cache=TRUE}
+
+gbmPFit1.4.1pct<-readRDS("data//gbmPFit1.4.1pct.rds")
+gbmPFit1.4.2pct<-readRDS("data//gbmPFit1.4.2pct.rds")
+
+gbmPFit2.4.1pct<-readRDS("data//gbmPFit2.4.1pct.rds")
+gbmPFit2.4.2pct<-readRDS("data//gbmPFit2.4.2pct.rds")
+```
+
+
+The top 10 variables importance for all models
+
+```{r top20imp, echo=FALSE, fig.align='center', fig.width=10, fig.height=10, warning=FALSE, message=FALSE}
+
+gbm1.4.1pct<-varImp(gbmPFit1.4.1pct, scale = T)
+gbm1.4.2pct<-varImp(gbmPFit1.4.2pct, scale = T)
+gbm2.4.1pct<-varImp(gbmPFit2.4.1pct, scale = T)
+gbm2.4.1pct<-varImp(gbmPFit2.4.1pct, scale = T)
+gbm.best1<-varImp(gbmPFit1.3, scale = T)
+gbm.best2<-varImp(gbmPFit2.3, scale = T)
+
+library(plotflow)
+plot1<-plot(gbm1.4.1pct, top = 10, main="Model 1: tolerance 1%")
+plot2<-plot(gbm1.4.1pct, top = 10,main="Model 1: tolerance 2%")
+plot3<-plot(gbm2.4.1pct, top = 10, main="Model 2: tolerance 1%")
+plot4<-plot(gbm2.4.1pct, top = 10, main="Model 2: tolerance 2%")
+plot5<-plot(gbm.best1, top = 10, main="Model 1: Best fit")
+plot6<-plot(gbm.best2, top = 10, main="Model 2: Best fit")
+
+
+grid.arrange(plot1, plot2, plot3, plot4, plot5, plot6, nrow = 3, 
+             main = textGrob("Top 10", 
+                             gp=gpar(fontsize=24, lty = "solid", lwd=3, cex=1)) )
+
+```
+
+
+### Results
+
+```{r, echo=FALSE}
+plot.confusionMatrix<-function(value, mainText=""){
+    opar <- par(mar=c(5.1, 6.1, 5.1, 2))
+    x <- x.orig <- unclass(value)
+    x <- log(x + 0.5) * 2.33
+    x[x < 0] <- NA
+    x[x > 10] <- 10
+    diag(x) <- -diag(x)
+    image(1:ncol(x), 1:ncol(x),
+          -(x[,nrow(x):1]), xlab='', ylab='',
+          col=colorRampPalette(c(hsv(h = 0, s = 0.9, v = 0.9, alpha = 1),
+                                 hsv(h = 0, s = 0, v = 0.9, alpha = 1),
+                                 hsv(h = 2/6, s = 0.9, v = 0.9, alpha = 1)))(41),
+          xaxt='n', yaxt='n', zlim=c(-10, 10))
+    axis(3, at=1:ncol(x), labels=colnames(x), cex.axis=0.8)
+    axis(2, at=ncol(x):1, labels=colnames(x), las=1, cex.axis=0.8)
+    title(ylab='Predicted', xlab='Actual', main=mainText, line=2.5)
+    abline(h = 0:ncol(x) + 0.5, col = 'gray')
+    abline(v = 0:ncol(x) + 0.5, col = 'gray')
+    text(1:5, rep(5:1, each=5),
+         labels = sub('^0$', '', round(c(x.orig), 0)))
+    box(lwd=2)
+    par(opar)
+}
+
+```
+
+**Confusion Matrix for 1% tolerance for the first model**
+
+```{r}
+
+```
+
+```{r plotCOnf1, echo=FALSE, warning=FALSE, fig.align='center', fig.width=8, fig.height=4}
+
+pred1.1pct<-predict(gbmPFit1.4.1pct , newdata = testing[, names(testing)!="classe"])
+cm1.1pct<-confusionMatrix(testing$classe, pred1.1pct)
+
+par(mfrow=c(1,2))
+plot.confusionMatrix(cm1.1pct$table, "Out of Sample Error")
+
+cmI1.1pct<-confusionMatrix(training$classe, 
+                           predict(gbmPFit1.4.1pct , newdata = training[, names(training)!="classe"]))
+plot.confusionMatrix(cmI1.1pct$table, "In Sample Error")
+
+```
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm1.1pct$overall), "html", align='c', table.attr = tableAttr)
+```
+Table: Overall Statistics 
+
+<br>
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm1.1pct$byClass), "html", align='c', table.attr = tableAttr)
+```  
+Table: Statistics by Class
+
+<br>
+<br>
+
+**Confusion Matrix for 2% tolerance for the first model**
+
+```{r, echo=FALSE, fig.align='center', fig.width=8, fig.height=4}
+pred1.2pct<-predict(gbmPFit1.4.2pct, newdata = testing[, names(testing)!="classe"])
+cm1.2pct<-confusionMatrix(testing$classe, pred1.2pct)
+
+par(mfrow=c(1,2))
+plot.confusionMatrix(cm1.2pct$table, "Out of Sample Error")
+cmI1.2pct<-confusionMatrix(training$classe, 
+                           predict(gbmPFit1.4.2pct , newdata = training[, names(training)!="classe"]))
+plot.confusionMatrix(cmI1.2pct$table, "In Sample Error")
+
+```
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm1.2pct$overall), "html", align='c', table.attr = tableAttr)
+```  
+Table: Overall Statistics 
+
+<br>
+```{r echo=FALSE, results='asis'}
+kable(t(cm1.2pct$byClass), "html", align='c', table.attr = tableAttr)
+```  
+Table: Statistics by Class
+
+<br>
+<br>
+
+**Confusion Matrix for 1% tolerance for the second model**
+
+```{r, echo=FALSE, fig.align='center', fig.width=8, fig.height=4}
+pred2.1pct<-predict(gbmPFit2.4.1pct , newdata = testing[, names(testing)!="classe"])
+cm2.1pct<-confusionMatrix(testing$classe, pred2.1pct)
+
+par(mfrow=c(1,2))
+plot.confusionMatrix(cm2.1pct$table, "Out of Sample Error")
+cmI2.1pct<-confusionMatrix(training$classe, 
+                           predict(gbmPFit2.4.1pct , newdata = training[, names(training)!="classe"]))
+plot.confusionMatrix(cmI2.1pct$table, "In Sample Error")
+
+```
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm2.1pct$overall), "html", align='c', table.attr = tableAttr)
+```  
+Table: Overall Statistics 
+
+<br>
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm2.1pct$byClass), "html", align='c', table.attr = tableAttr)
+```  
+Table: Statistics by Class
+
+<br>
+<br>
+
+**Confusion Matrix for 2% tolerance for the second model**
+
+```{r, echo=FALSE, fig.align='center', fig.width=8, fig.height=4}
+pred2.2pct<-predict(gbmPFit2.4.2pct, newdata = testing[, names(testing)!="classe"])
+cm2.2pct<-confusionMatrix(testing$classe, pred2.2pct)
+
+par(mfrow=c(1,2))
+plot.confusionMatrix(cm2.2pct$table, "Out of Sample Error")
+
+cmI2.2pct<-confusionMatrix(training$classe, 
+                           predict(gbmPFit2.4.2pct , newdata = training[, names(training)!="classe"]))
+plot.confusionMatrix(cmI2.2pct$table, "In Sample Error")
+
+```
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm2.2pct$overall), "html", align='c', table.attr = tableAttr)
+```  
+Table: Overall Statistics 
+
+<br>
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm2.2pct$byClass), "html", align='c', table.attr = tableAttr)
+```  
+Table: Statistics by Class
+
+<br>
+<br>
+
+**Confusion Matrix for best fit with interaction depth of 12, 500 threes, and shrinkage of 0.1**
+
+```{r, echo=FALSE, fig.align='center', fig.width=8, fig.height=4}
+pred.best1<-predict(gbmPFit1.3 , newdata = testing[, names(testing)!="classe"])
+cm.best1<-confusionMatrix(testing$classe, pred.best1)
+
+par(mfrow=c(1,2))
+plot.confusionMatrix(cm.best1$table, "Out of Sample Error")
+
+cmI.best1<-confusionMatrix(training$classe, 
+                           predict(gbmPFit1.3 , newdata = training[, names(training)!="classe"]))
+plot.confusionMatrix(cmI.best1$table, "In Sample Error")
+
+```
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm.best1$overall), "html", align='c', table.attr = tableAttr)
+```  
+Table: Overall Statistics 
+
+<br>
+```{r echo=FALSE, results='asis'}
+kable(t(cm.best1$byClass), "html", align='c', table.attr = tableAttr)
+```  
+Table: Statistics by Class
+
+<br>
+<br>
+
+**Confusion Matrix for best fit with interaction depth of 12, 1000 threes, and shrinkage of 0.05**
+
+```{r, echo=FALSE, fig.align='center', fig.width=8, fig.height=4}
+pred.best2<-predict(gbmPFit2.3 , newdata = testing[, names(testing)!="classe"])
+cm.best2<-confusionMatrix(testing$classe, pred.best2)
+
+par(mfrow=c(1,2))
+plot.confusionMatrix(cm.best2$table, "Out of Sample Error")
+
+cmI.best2<-confusionMatrix(training$classe, 
+                           predict(gbmPFit2.3 , newdata = training[, names(training)!="classe"]))
+plot.confusionMatrix(cmI.best2$table, "In Sample Error")
+
+```
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm.best1$overall), "html", align='c', table.attr = tableAttr)
+```  
+Table: Overall Statistics 
+<br>
+
+```{r echo=FALSE, results='asis'}
+kable(t(cm.best2$byClass), "html", align='c', table.attr = tableAttr)
+```  
+Table: Statistics by Class
+
+<br>
+<br>
+
+From the tables we see that the GBM performs reasonably well on both models (best fit and with tolerance). Using the most simple model (Model 1, 2% tolerance, 200 iterations, complexity of the tree 4, and learning rate of 0.1), there exists a high accuracy (Kappa = 98.74%), in addition, that model is high sensivity and specifity. The best fit models have high accuracy, sensivity and specifity, in addition, that model is more complex.
+
+### Unknown Test
+
+The results from the unknown test are:
+
+
+
+```{r tableRes, echo=FALSE}
+predUnk1.1pct<-predict(gbmPFit1.4.1pct , newdata = validationDS)
+predUnk1.2pct<-predict(gbmPFit1.4.2pct , newdata = validationDS)
+predUnk2.1pct<-predict(gbmPFit2.4.1pct , newdata = validationDS)
+predUnk2.2pct<-predict(gbmPFit2.4.2pct , newdata = validationDS)
+predUnk.best1<-predict(gbmPFit1.3 , newdata = validationDS)
+predUnk.best2<-predict(gbmPFit2.3 , newdata = validationDS)
+
+```
+
+**First Model 1%**
+```{r, echo=FALSE}
+print(predUnk1.1pct)
+
+```
+
+**First Model 2%**
+
+```{r, echo=FALSE}
+predUnk1.2pct
+
+```
+
+**Second Model 1%**
+```{r, echo=FALSE}
+predUnk2.1pct
+
+```
+
+**Second Model 2%**
+```{r, echo=FALSE}
+predUnk2.2pct
+
+```
+
+**Best Model 1%**
+```{r, echo=FALSE}
+predUnk.best1
+
+```
+
+**Best Model 2%**
+```{r, echo=FALSE}
+predUnk.best2
+
+```
+
+
+
+
+### References
+[1] Friedman[GBM](http://statweb.stanford.edu/~jhf/ftp/stobst.pdf)  
+[2] KUHN, M., & JOHNSON, K. (2013). Applied predictive modeling. New York, NY, Springer. http://dx.doi.org/10.1007/978-1-4614-6849-3.  
+[3] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. Read more: [Groupware](http://groupware.les.inf.puc-rio.br/har)  
+[4] Library [Caret](http://topepo.github.io/caret/)  
